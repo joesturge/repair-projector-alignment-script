@@ -1,6 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
-using Sandbox.Game.EntityComponents;
+using System.Numerics;
 using Sandbox.ModAPI.Ingame;
 using Sandbox.ModAPI.Interfaces;
 using VRage.Game.GUI.TextPanel;
@@ -11,167 +11,101 @@ namespace IngameScript
 {
     public partial class Program : MyGridProgram
     {
-        private string ProjectorTag;
+        private float OffsetMutationRate;
+        private int MaxStepsWithNoImprovementBeforeRotating;
+        private float MaxFitnessThisRotation;
+        private float ForceApplyRate;
 
         private IMyTextSurface Screen;
-
         private IMyProjector Projector;
 
+        private string ProjectorTag;
         private int MaxSteps;
 
-        bool Init()
-        {
-            // Get the screen surface and initialize it
-            Screen = Me.GetSurface(0);
-            Screen.ContentType = ContentType.TEXT_AND_IMAGE;
-            Screen.WriteText("");
+        // Current Values
+        private int StepsSinceImprovement;
+        private int Step;
+        private float Fitness;
+        private int OffsetX;
+        private int OffsetY;
+        private int OffsetZ;
+        private int Rotation;
 
-            ParseConfig();
+        // Previous Values
+        private int PrevStepsSinceImprovement;
+        private int PrevStep;
+        private float PrevFitness;
+        private int PrevOffsetX;
+        private int PrevOffsetY;
+        private int PrevOffsetZ;
+        private int PrevRotation;
 
-            if (!FindProjector())
-            {
-                return false;
-            }
-
-            return true;
-        }
-
-        void Log(string message, MessageLevel level, bool append = true)
-        {
-            Screen.WriteText($"[{MessageLevelToString(level)}] {message}" + "\n", append: append);
-        }
-
-        void InitConfig(MyIni config)
-        {
-            config.Clear();
-            config.AddSection("projector");
-            config.Set("projector", "tag", "RPA");
-            config.SetComment("projector", "tag", "The tag of the projector to align");
-            config.AddSection("options");
-            config.Set("options", "maxSteps", 10);
-            config.SetComment("options", "maxSteps", "The maximum number of steps to take when aligning the projector");
-            config.SetEndComment(@"
-Repair projector alignment
-
-This script will align the repair projector tagged with [RPA] with the grid
-
-and ensure it is properly configured for repairs.
-
-Rerun the script if you update the blueprint
-
-Change the options above to fit your needs.
-                ");
-            Me.CustomData = config.ToString();
-        }
 
         void ParseConfig()
         {
             var config = new MyIni();
-            if (!config.TryParse(Me.CustomData))
-            {
-                InitConfig(config);
-            }
-            else if (!config.ContainsKey("projector", "tag"))
-            {
-                InitConfig(config);
-            }
-
-            ProjectorTag = config.Get("projector", "tag").ToString();
-            MaxSteps = config.Get("options", "maxSteps").ToInt32(1000);
-            Log($"Projector tag set to: [{ProjectorTag}]", MessageLevel.Info);
+            config.TryParse(Me.CustomData);
+            ProjectorTag = config.Get("Settings", "ProjectorTag").ToString("RPA");
+            MaxSteps = config.Get("Settings", "MaxSteps").ToInt32(20000);
+            OffsetMutationRate = config.Get("Settings", "OffsetMutationRate").ToSingle(0.15f);
+            MaxStepsWithNoImprovementBeforeRotating = config.Get("Settings", "MaxStepsWithNoImprovementBeforeRotating").ToInt32(100);
+            ForceApplyRate = config.Get("Settings", "ForceApplyRate").ToSingle(0.01f);
+            PrevStep = config.Get("Internal", "PrevStep").ToInt32(0);
+            PrevFitness = config.Get("Internal", "PrevFitness").ToSingle(0f);
+            PrevOffsetX = config.Get("Internal", "PrevOffsetX").ToInt32(0);
+            PrevOffsetY = config.Get("Internal", "PrevOffsetY").ToInt32(0);
+            PrevOffsetZ = config.Get("Internal", "PrevOffsetZ").ToInt32(0);
+            PrevRotation = config.Get("Internal", "PrevRotation").ToInt32(0);
+            PrevStepsSinceImprovement = config.Get("Internal", "PrevStepsSinceImprovement").ToInt32(0);
+            MaxFitnessThisRotation = config.Get("Internal", "MaxFitnessThisRotation").ToSingle(0f);
         }
 
-        bool FindProjector()
-        {
-            var blocks = new List<IMyTerminalBlock>();
-            GridTerminalSystem.SearchBlocksOfName($"[{ProjectorTag}]", blocks);
-
-            if (blocks.Count == 1 && blocks[0] is IMyProjector)
-            {
-                Projector = blocks[0] as IMyProjector;
-                Log($"Projector found: {Projector.CustomName}", MessageLevel.Info);
-                return true;
-            }
-            Log($"Error: Expected one projector with tag [{ProjectorTag}], found {blocks.Count}.", MessageLevel.Error);
-            return false;
-        }
-
-        int GetPreviousCompleteness()
+        void SaveConfig()
         {
             var config = new MyIni();
-            if (config.TryParse(Projector.CustomData))
-            {
-                return config.Get("projector", "completeness").ToInt32(0);
-            }
-            config.AddSection("projector");
-            config.Set("projector", "completeness", GetCompleteness());
-            config.Set("projector", "step", 0);
-            config.Set("projector", "offsetX", 0);
-            config.Set("projector", "offsetY", 0);
-            config.Set("projector", "offsetZ", 0);
-            config.Set("projector", "rotX", 0);
-            config.Set("projector", "rotY", 0);
-            config.Set("projector", "rotZ", 0);
-            Projector.CustomData = config.ToString();
-            return GetCompleteness();
+            config.Set("Settings", "ProjectorTag", ProjectorTag);
+            config.Set("Settings", "MaxSteps", MaxSteps);
+            config.Set("Settings", "OffsetMutationRate", OffsetMutationRate);
+            config.Set("Settings", "MaxStepsWithNoImprovementBeforeRotating", MaxStepsWithNoImprovementBeforeRotating);
+            config.Set("Settings", "ForceApplyRate", ForceApplyRate);
+            config.Set("Internal", "PrevStep", Step);
+            config.Set("Internal", "PrevFitness", Fitness);
+            config.Set("Internal", "PrevOffsetX", OffsetX);
+            config.Set("Internal", "PrevOffsetY", OffsetY);
+            config.Set("Internal", "PrevOffsetZ", OffsetZ);
+            config.Set("Internal", "PrevRotation", Rotation);
+            config.Set("Internal", "PrevStepsSinceImprovement", StepsSinceImprovement);
+            config.Set("Internal", "MaxFitnessThisRotation", MaxFitnessThisRotation);
+            Me.CustomData = config.ToString();
         }
 
-        int GetCurrentStep()
+        void UpdateOffsets()
         {
-            var config = new MyIni();
-            if (config.TryParse(Projector.CustomData))
-            {
-                return config.Get("projector", "step").ToInt32(0);
-            }
-            return 0;
+            Projector.ProjectionOffset = new Vector3I(OffsetX, OffsetY, OffsetZ);
+            // Unflatten to RotX, RotY, RotZ
+            var RotX = (Rotation / 16) - 2;
+            var RotY = (Rotation % 16 / 4) - 2;
+            var RotZ = (Rotation % 4) - 2;
+            Projector.ProjectionRotation = new Vector3I(RotX, RotY, RotZ);
+            Projector.UpdateOffsetAndRotation();
         }
 
-        void NextStep(int value)
+        void FitnessFunction()
         {
-            var config = new MyIni();
-            if (config.TryParse(Projector.CustomData))
-            {
-                config.Set("projector", "step", value);
-                config.Set("projector", "completeness", GetCompleteness());
-                config.Set("projector", "offsetX", Projector.ProjectionOffset.X);
-                config.Set("projector", "offsetY", Projector.ProjectionOffset.Y);
-                config.Set("projector", "offsetZ", Projector.ProjectionOffset.Z);
-                config.Set("projector", "rotX", Projector.ProjectionRotation.X);
-                config.Set("projector", "rotY", Projector.ProjectionRotation.Y);
-                config.Set("projector", "rotZ", Projector.ProjectionRotation.Z);
-                Projector.CustomData = config.ToString();
-            }
-        }
+            var complete = (Projector.TotalBlocks - Projector.RemainingBlocks) / (float)Projector.TotalBlocks;
+            var weldable = 1 - (Projector.TotalBlocks - Projector.BuildableBlocksCount) / (float)Projector.TotalBlocks;
 
-        void ResetToPreviousOffsets()
-        {
-            var config = new MyIni();
-            if (config.TryParse(Projector.CustomData))
+            if (complete >= 1)
             {
-                Projector.ProjectionOffset = new Vector3I(
-                    config.Get("projector", "offsetX").ToInt32(0),
-                    config.Get("projector", "offsetY").ToInt32(0),
-                    config.Get("projector", "offsetZ").ToInt32(0)
-                );
-                Projector.ProjectionRotation = new Vector3I(
-                    config.Get("projector", "rotX").ToInt32(0),
-                    config.Get("projector", "rotY").ToInt32(0),
-                    config.Get("projector", "rotZ").ToInt32(0)
-                );
-                Projector.UpdateOffsetAndRotation();
-                config.Set("projector", "step", GetCurrentStep() + 1);
-                Projector.CustomData = config.ToString();
-            }
-        }
-
-        int GetCompleteness()
-        {
-            if (Projector.RemainingBlocks <= 0)
+                Fitness = 1;
+            } else if (weldable > complete)
             {
-                return 0;
+                Fitness = 0.2f * weldable + 0.8f * complete;
             }
-
-            return Projector.TotalBlocks * 3 - Projector.BuildableBlocksCount - 2 * Projector.RemainingBlocks;
+            else
+            {
+                Fitness = complete;
+            }
         }
 
         public Program()
@@ -186,120 +120,134 @@ Change the options above to fit your needs.
 
         public void Main(string argument, UpdateType updateSource)
         {
-            if (!Init())
+            // Reset if arg is RESET
+            if (argument == "RESET")
             {
-                Log("Initialization failed.", MessageLevel.Error);
-                return;
-            }
-            Log("Initialization complete.", MessageLevel.Info);
-
-            Projector.Enabled = true;
-            if (!Projector.IsWorking)
-            {
-                Log($"{Projector.CustomName} is not functional.", MessageLevel.Error);
-                return;
-            }
-            Log($"{Projector.CustomName} is functional.", MessageLevel.Info);
-
-            Projector.SetValue("KeepProjection", true);
-            Projector.SetValue("OnOff", true);
-
-            // Attempt to spawn projection
-            Projector.ApplyAction("SpawnProjection");
-
-            if (!Projector.IsProjecting)
-            {
-                Log($"Failed to spawn projection on [{Projector.CustomName}].", MessageLevel.Error);
-                return;
-            }
-            Log($"Successfully spawned projection on [{Projector.CustomName}].", MessageLevel.Info);
-
-            if (GetCompleteness() <= 0)
-            {
-                Log($"Projection on [{Projector.CustomName}] is aligned.", MessageLevel.Info);
+                ParseConfig();
+                Step = 0;
+                SaveConfig();
+                Halt();
                 return;
             }
 
-            Log($"Aligning projection on [{Projector.CustomName}]...", MessageLevel.Info);
-
-            int step = GetCurrentStep();
-
-            Log($"Step {step} of {MaxSteps}", MessageLevel.Info);
-
-            if (step <= 0)
+            if (updateSource != UpdateType.Update100 && updateSource != UpdateType.Update10 && updateSource != UpdateType.Update1)
             {
-                Projector.ProjectionOffset = new Vector3I(0, 0, 0);
-                Projector.ProjectionRotation = new Vector3I(0, 0, 0);
-                Projector.UpdateOffsetAndRotation();
-                NextStep(0);
-            }
-
-            if (step > MaxSteps)
-            {
-                Log($"Max steps reached, projection on [{Projector.CustomName}] is not aligned.", MessageLevel.Warning);
                 return;
             }
 
+            // Get the screen surface and initialize it
+            Screen = Me.GetSurface(0);
+            Screen.ContentType = ContentType.TEXT_AND_IMAGE;
+            Screen.WriteText("");
+
+            // Parse the configuration
+            ParseConfig();
+
+            // Increment Step
+            Step = PrevStep + 1;
+
+            // Log Current Step
+            Log($"Step {Step} of {MaxSteps}.", MessageLevel.Info, append: false);
+
+            // Abort if exceeded max steps
+            if (Step > MaxSteps)
+            {
+                Log($"Exceeded {MaxSteps} Steps, aborting.", MessageLevel.Error, append: true);
+                Halt();
+                return;
+            }
+
+            // Find the projector block
+            var blocks = new List<IMyTerminalBlock>();
+            GridTerminalSystem.SearchBlocksOfName($"[{ProjectorTag}]", blocks);
+            if (blocks.Count != 1 || !(blocks[0] is IMyProjector))
+            {
+                Log($"Could not find projector with tag [{ProjectorTag}].", MessageLevel.Error, append: true);
+                Halt();
+                return;
+            }
+            Projector = blocks[0] as IMyProjector;
+
+            if (PrevStep == 0)
+            {
+                // Ensure the projector is functional
+                if (!Projector.IsWorking)
+                {
+                    Log($"Projector [{ProjectorTag}] is not functional.", MessageLevel.Error, append: true);
+                    Halt();
+                    return;
+                }
+
+                // Start projection
+                Projector.SetValue("KeepProjection", true);
+                Projector.SetValue("OnOff", true);
+                Projector.ApplyAction("SpawnProjection");
+
+                if (!Projector.IsProjecting)
+                {
+                    Log($"Projector [{ProjectorTag}] failed to start projection.", MessageLevel.Error, append: true);
+                    Halt();
+                    return;
+                }
+
+                OffsetX = PrevOffsetX;
+                OffsetY = PrevOffsetY;
+                OffsetZ = PrevOffsetZ;
+                Rotation = PrevRotation;
+
+                FitnessFunction();
+                UpdateOffsets();
+                SaveConfig();
+                return;
+            }
+
+            // Calculate Current Fitness
+            FitnessFunction();
+            if (Fitness >= 1f)
+            {
+                Log("Success!", MessageLevel.Info);
+                Log($"Projector Aligned in {Step} Steps.", MessageLevel.Info);
+                Halt();
+                return;
+            }
+            Log($"Fitness: {Fitness}", MessageLevel.Info);
             Random random = new Random();
 
-            // Randomly force accept
-            int forceAccept = random.Next(100);
-
-            Log($"Prev: {GetPreviousCompleteness()}, Curr: {GetCompleteness()}", MessageLevel.Info);
-            if (GetPreviousCompleteness() > GetCompleteness() || forceAccept < 5)
+            if (Fitness > PrevFitness || random.NextDouble() < ForceApplyRate)
             {
-                Log("No rollback needed", MessageLevel.Info);
+                OffsetX = random.NextDouble() < OffsetMutationRate ? OffsetX + 1 : OffsetX;
+                OffsetX = random.NextDouble() < OffsetMutationRate ? OffsetX - 1 : OffsetX;
+                OffsetY = random.NextDouble() < OffsetMutationRate ? OffsetY + 1 : OffsetY;
+                OffsetY = random.NextDouble() < OffsetMutationRate ? OffsetY - 1 : OffsetY;
+                OffsetZ = random.NextDouble() < OffsetMutationRate ? OffsetZ + 1 : OffsetZ;
+                OffsetZ = random.NextDouble() < OffsetMutationRate ? OffsetZ - 1 : OffsetZ;
             }
             else
             {
-                Log("Rollback needed", MessageLevel.Info);
-                ResetToPreviousOffsets();
-                return;
+                OffsetX = PrevOffsetX;
+                OffsetY = PrevOffsetY;
+                OffsetZ = PrevOffsetZ;
             }
 
-            // Randomly pick axis: 0=X, 1=Y, 2=Z
-            int axis = random.Next(3);
-
-            // Randomly pick direction: -1 or 1
-            int dir = random.Next(2) == 0 ? -1 : 1;
-
-            // Randomly decide to change offset or rotation
-            bool changeOffset = random.Next(100) < 95;
-
-            if (changeOffset)
+            StepsSinceImprovement = PrevStepsSinceImprovement + 1;
+            if (MaxFitnessThisRotation < Fitness)
             {
-                // Change offset
-                switch (axis)
-                {
-                    case 0:
-                        Projector.ProjectionOffset += new Vector3I(dir, 0, 0);
-                        break;
-                    case 1:
-                        Projector.ProjectionOffset += new Vector3I(0, dir, 0);
-                        break;
-                    case 2:
-                        Projector.ProjectionOffset += new Vector3I(0, 0, dir);
-                        break;
-                }
+                MaxFitnessThisRotation = Fitness;
+                StepsSinceImprovement = 0;
             }
-            else
+
+            if (StepsSinceImprovement > MaxStepsWithNoImprovementBeforeRotating)
             {
-                // Change rotation
-                switch (axis)
-                {
-                    case 0:
-                        Projector.ProjectionRotation += new Vector3I(dir * 90, 0, 0);
-                        break;
-                    case 1:
-                        Projector.ProjectionRotation += new Vector3I(0, dir * 90, 0);
-                        break;
-                    case 2:
-                        Projector.ProjectionRotation += new Vector3I(0, 0, dir * 90);
-                        break;
-                }
+                Rotation = (PrevRotation + 1) % 64;
+                MaxFitnessThisRotation = 0;
+                StepsSinceImprovement = 0;
             }
-            Projector.UpdateOffsetAndRotation();
-            NextStep(step + 1);
+
+            Log($"Max Fitness This Rotation: {MaxFitnessThisRotation}", MessageLevel.Info);
+            Log($"Steps Since Improvement: {StepsSinceImprovement}", MessageLevel.Info);
+            Log($"Offset: {OffsetX}, {OffsetY}, {OffsetZ}, {Rotation}", MessageLevel.Info);
+            UpdateOffsets();
+            SaveConfig();
         }
 
         private enum MessageLevel
@@ -307,6 +255,16 @@ Change the options above to fit your needs.
             Info,
             Warning,
             Error
+        }
+
+        void Halt()
+        {
+            Runtime.UpdateFrequency = UpdateFrequency.None;
+        }
+
+        void Log(string message, MessageLevel level, bool append = true)
+        {
+            Screen.WriteText($"[{MessageLevelToString(level)}] {message}" + "\n", append: append);
         }
 
         private static string MessageLevelToString(MessageLevel level)
@@ -319,5 +277,7 @@ Change the options above to fit your needs.
                 default: return level.ToString();
             }
         }
+
+
     }
 }
