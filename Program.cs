@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Numerics;
+using Sandbox.Game.Entities;
+using Sandbox.Gui;
 using Sandbox.ModAPI.Ingame;
 using Sandbox.ModAPI.Interfaces;
 using VRage.Game.GUI.TextPanel;
@@ -11,101 +13,63 @@ namespace IngameScript
 {
     public partial class Program : MyGridProgram
     {
-        private float OffsetMutationRate;
-        private int MaxStepsWithNoImprovementBeforeRotating;
-        private float MaxFitnessThisRotation;
-        private float ForceApplyRate;
-
         private IMyTextSurface Screen;
         private IMyProjector Projector;
-
         private string ProjectorTag;
-        private int MaxSteps;
-
-        // Current Values
-        private int StepsSinceImprovement;
         private int Step;
-        private float Fitness;
-        private int OffsetX;
-        private int OffsetY;
-        private int OffsetZ;
         private int Rotation;
 
-        // Previous Values
-        private int PrevStepsSinceImprovement;
-        private int PrevStep;
-        private float PrevFitness;
-        private int PrevOffsetX;
-        private int PrevOffsetY;
-        private int PrevOffsetZ;
-        private int PrevRotation;
-
-
-        void ParseConfig()
+        private void ParseConfig()
         {
             var config = new MyIni();
             config.TryParse(Me.CustomData);
             ProjectorTag = config.Get("Settings", "ProjectorTag").ToString("RPA");
-            MaxSteps = config.Get("Settings", "MaxSteps").ToInt32(20000);
-            OffsetMutationRate = config.Get("Settings", "OffsetMutationRate").ToSingle(0.15f);
-            MaxStepsWithNoImprovementBeforeRotating = config.Get("Settings", "MaxStepsWithNoImprovementBeforeRotating").ToInt32(100);
-            ForceApplyRate = config.Get("Settings", "ForceApplyRate").ToSingle(0.01f);
-            PrevStep = config.Get("Internal", "PrevStep").ToInt32(0);
-            PrevFitness = config.Get("Internal", "PrevFitness").ToSingle(0f);
-            PrevOffsetX = config.Get("Internal", "PrevOffsetX").ToInt32(0);
-            PrevOffsetY = config.Get("Internal", "PrevOffsetY").ToInt32(0);
-            PrevOffsetZ = config.Get("Internal", "PrevOffsetZ").ToInt32(0);
-            PrevRotation = config.Get("Internal", "PrevRotation").ToInt32(0);
-            PrevStepsSinceImprovement = config.Get("Internal", "PrevStepsSinceImprovement").ToInt32(0);
-            MaxFitnessThisRotation = config.Get("Internal", "MaxFitnessThisRotation").ToSingle(0f);
+            Step = config.Get("Internal", "Step").ToInt32(-1);
+            Rotation = config.Get("Internal", "Rotation").ToInt32(-1);
         }
 
-        void SaveConfig()
+        private void SaveConfig()
         {
             var config = new MyIni();
             config.Set("Settings", "ProjectorTag", ProjectorTag);
-            config.Set("Settings", "MaxSteps", MaxSteps);
-            config.Set("Settings", "OffsetMutationRate", OffsetMutationRate);
-            config.Set("Settings", "MaxStepsWithNoImprovementBeforeRotating", MaxStepsWithNoImprovementBeforeRotating);
-            config.Set("Settings", "ForceApplyRate", ForceApplyRate);
-            config.Set("Internal", "PrevStep", Step);
-            config.Set("Internal", "PrevFitness", Fitness);
-            config.Set("Internal", "PrevOffsetX", OffsetX);
-            config.Set("Internal", "PrevOffsetY", OffsetY);
-            config.Set("Internal", "PrevOffsetZ", OffsetZ);
-            config.Set("Internal", "PrevRotation", Rotation);
-            config.Set("Internal", "PrevStepsSinceImprovement", StepsSinceImprovement);
-            config.Set("Internal", "MaxFitnessThisRotation", MaxFitnessThisRotation);
+            config.Set("Internal", "Step", Step);
+            config.Set("Internal", "Rotation", Rotation);
             Me.CustomData = config.ToString();
         }
 
-        void UpdateOffsets()
+        private Vector3I GetNextBlock()
         {
-            Projector.ProjectionOffset = new Vector3I(OffsetX, OffsetY, OffsetZ);
+            var minVec = Me.CubeGrid.Min;
+            var maxVec = Me.CubeGrid.Max;
+            var maxSteps = (maxVec.X - minVec.X + 1) * (maxVec.Y - minVec.Y + 1) * (maxVec.Z - minVec.Z + 1);
+
+            Vector3I currentVec;
+            Step--;
+            do
+            {
+                // Get current vector from step (ie one step for every position in 3d grid)
+                Step++;
+                currentVec = new Vector3I(
+                    minVec.X + (Step % (maxVec.X - minVec.X + 1)),
+                    minVec.Y + (Step / (maxVec.X - minVec.X + 1) % (maxVec.Y - minVec.Y + 1)),
+                    minVec.Z + (Step / ((maxVec.X - minVec.X + 1) * (maxVec.Y - minVec.Y + 1)) % (maxVec.Z - minVec.Z + 1))
+                );
+            } while (Me.CubeGrid.CubeExists(currentVec) && Step < maxSteps);
+
+            if (Step >= maxSteps)
+            {
+                return new Vector3I(int.MaxValue, int.MaxValue, int.MaxValue);
+            }
+            return currentVec;
+        }
+
+        private Vector3I GetRotationFromIndex(int index)
+        {
             // Unflatten to RotX, RotY, RotZ
             var RotX = (Rotation / 16) - 2;
             var RotY = (Rotation % 16 / 4) - 2;
             var RotZ = (Rotation % 4) - 2;
-            Projector.ProjectionRotation = new Vector3I(RotX, RotY, RotZ);
-            Projector.UpdateOffsetAndRotation();
-        }
-
-        void FitnessFunction()
-        {
-            var complete = (Projector.TotalBlocks - Projector.RemainingBlocks) / (float)Projector.TotalBlocks;
-            var weldable = 1 - (Projector.TotalBlocks - Projector.BuildableBlocksCount) / (float)Projector.TotalBlocks;
-
-            if (complete >= 1)
-            {
-                Fitness = 1;
-            } else if (weldable > complete)
-            {
-                Fitness = 0.2f * weldable + 0.8f * complete;
-            }
-            else
-            {
-                Fitness = complete;
-            }
+            return new Vector3I(RotX, RotY, RotZ);
         }
 
         public Program()
@@ -120,16 +84,7 @@ namespace IngameScript
 
         public void Main(string argument, UpdateType updateSource)
         {
-            // Reset if arg is RESET
-            if (argument == "RESET")
-            {
-                ParseConfig();
-                Step = 0;
-                SaveConfig();
-                Halt();
-                return;
-            }
-
+            // Check if the update source is valid
             if (updateSource != UpdateType.Update100 && updateSource != UpdateType.Update10 && updateSource != UpdateType.Update1)
             {
                 return;
@@ -143,20 +98,6 @@ namespace IngameScript
             // Parse the configuration
             ParseConfig();
 
-            // Increment Step
-            Step = PrevStep + 1;
-
-            // Log Current Step
-            Log($"Step {Step} of {MaxSteps}.", MessageLevel.Info, append: false);
-
-            // Abort if exceeded max steps
-            if (Step > MaxSteps)
-            {
-                Log($"Exceeded {MaxSteps} Steps, aborting.", MessageLevel.Error, append: true);
-                Halt();
-                return;
-            }
-
             // Find the projector block
             var blocks = new List<IMyTerminalBlock>();
             GridTerminalSystem.SearchBlocksOfName($"[{ProjectorTag}]", blocks);
@@ -168,7 +109,18 @@ namespace IngameScript
             }
             Projector = blocks[0] as IMyProjector;
 
-            if (PrevStep == 0)
+            // Increment rotation
+            Rotation++;
+            Rotation %= 64;
+
+            // Increment step if all rotations are done
+            if (Rotation == 0)
+            {
+                Step++;
+            }
+
+            // Init projector on first step
+            if (Step == 0)
             {
                 // Ensure the projector is functional
                 if (!Projector.IsWorking)
@@ -189,64 +141,38 @@ namespace IngameScript
                     Halt();
                     return;
                 }
-
-                OffsetX = PrevOffsetX;
-                OffsetY = PrevOffsetY;
-                OffsetZ = PrevOffsetZ;
-                Rotation = PrevRotation;
-
-                FitnessFunction();
-                UpdateOffsets();
-                SaveConfig();
-                return;
             }
 
-            // Calculate Current Fitness
-            FitnessFunction();
-            if (Fitness >= 1f)
+            if (Projector.RemainingBlocks == 0)
             {
-                Log("Success!", MessageLevel.Info);
-                Log($"Projector Aligned in {Step} Steps.", MessageLevel.Info);
+                Log($"Projector [{ProjectorTag}] has completed projection.", MessageLevel.Info, append: true);
                 Halt();
                 return;
             }
-            Log($"Fitness: {Fitness}", MessageLevel.Info);
-            Random random = new Random();
 
-            if (Fitness > PrevFitness || random.NextDouble() < ForceApplyRate)
+            var minVec = Me.CubeGrid.Min;
+            var maxVec = Me.CubeGrid.Max;
+
+            // Get current vector from step (ie one step for every position in 3d grid)
+            Vector3I currentVec = GetNextBlock();
+
+            if (currentVec == new Vector3I(int.MaxValue, int.MaxValue, int.MaxValue))
             {
-                OffsetX = random.NextDouble() < OffsetMutationRate ? OffsetX + 1 : OffsetX;
-                OffsetX = random.NextDouble() < OffsetMutationRate ? OffsetX - 1 : OffsetX;
-                OffsetY = random.NextDouble() < OffsetMutationRate ? OffsetY + 1 : OffsetY;
-                OffsetY = random.NextDouble() < OffsetMutationRate ? OffsetY - 1 : OffsetY;
-                OffsetZ = random.NextDouble() < OffsetMutationRate ? OffsetZ + 1 : OffsetZ;
-                OffsetZ = random.NextDouble() < OffsetMutationRate ? OffsetZ - 1 : OffsetZ;
-            }
-            else
-            {
-                OffsetX = PrevOffsetX;
-                OffsetY = PrevOffsetY;
-                OffsetZ = PrevOffsetZ;
+                Log($"Every combination tried and no match found", MessageLevel.Error, append: true);
+                Halt();
+                return;
             }
 
-            StepsSinceImprovement = PrevStepsSinceImprovement + 1;
-            if (MaxFitnessThisRotation < Fitness)
-            {
-                MaxFitnessThisRotation = Fitness;
-                StepsSinceImprovement = 0;
-            }
+            Log($"Step {Step}: Projecting to {currentVec}", MessageLevel.Info, append: true);
+            Projector.ProjectionOffset = currentVec;
 
-            if (StepsSinceImprovement > MaxStepsWithNoImprovementBeforeRotating)
-            {
-                Rotation = (PrevRotation + 1) % 64;
-                MaxFitnessThisRotation = 0;
-                StepsSinceImprovement = 0;
-            }
+            Log($"Trying Rotation {Rotation}", MessageLevel.Info, append: true);
+            Projector.ProjectionRotation = GetRotationFromIndex(Rotation);
 
-            Log($"Max Fitness This Rotation: {MaxFitnessThisRotation}", MessageLevel.Info);
-            Log($"Steps Since Improvement: {StepsSinceImprovement}", MessageLevel.Info);
-            Log($"Offset: {OffsetX}, {OffsetY}, {OffsetZ}, {Rotation}", MessageLevel.Info);
-            UpdateOffsets();
+            // Update the projector's offset and rotation
+            Projector.UpdateOffsetAndRotation();
+
+            // Save the current state
             SaveConfig();
         }
 
