@@ -142,7 +142,10 @@ namespace IngameScript
             var candidate = new Vector3I(x, y, z);
             if (Me.CubeGrid.CubeExists(candidate))
             {
-              GridCubes.Add(candidate + projectorCorrection);
+              if (Me.CubeGrid.GetCubeBlock(candidate) != null)
+              {
+                GridCubes.Add(Me.CubeGrid.GetCubeBlock(candidate).Position + projectorCorrection);
+              }
             }
           }
         }
@@ -155,7 +158,7 @@ namespace IngameScript
 
     public Program()
     {
-      Runtime.UpdateFrequency = UpdateFrequency.Update1;
+      Runtime.UpdateFrequency = UpdateFrequency.Update100;
     }
 
     public void Save()
@@ -188,6 +191,7 @@ namespace IngameScript
 
       Log($"Step: {Step} of {GridCubes.Count}", MessageLevel.Info, append: true);
       Log($"Remaining Blocks: {Projector.RemainingBlocks}", MessageLevel.Info, append: true);
+
       if (Projector.RemainingBlocks <= 0)
       {
         Log("Successfully aligned projection.", MessageLevel.Info, append: true);
